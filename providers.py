@@ -9,13 +9,14 @@ CONFIG = {
     'gemini': ('GEMINI_API_KEY', 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'),
     'openrouter': ('OPENROUTER_API_KEY', 'https://openrouter.ai/api/v1/chat/completions'),
     'anthropic': ('ANTHROPIC_API_KEY', 'https://api.anthropic.com/v1/messages'),
+    'llamacpp': ('OPENAI_API_KEY', 'http://localhost:9931/v1/chat/completions'),
 }
 
 
 def post_json(url, headers, payload):
     req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json', **headers})
     try:
-        with urllib.request.urlopen(req, timeout=60) as response:
+        with urllib.request.urlopen(req, timeout=600) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         # Do not print response bodies: they may contain account or request data.
@@ -44,6 +45,8 @@ class Provider:
     def complete(self, messages, schemas):
         if self.name == 'anthropic':
             return self._anthropic(messages, schemas)
+        if self.name == 'llamacpp':
+            return self._llamacpp(messages, schemas)
         payload = {'model': self.model, 'messages': messages}
         if schemas:
             payload['tools'] = schemas
@@ -87,3 +90,28 @@ class Provider:
             message['tool_calls'] = [{'id': c['id'], 'type': 'function', 'function': {'name': c['name'], 'arguments': c['arguments']}} for c in calls]
         reason = {'end_turn': 'stop', 'tool_use': 'tool_calls', 'max_tokens': 'length'}.get(data.get('stop_reason'), data.get('stop_reason'))
         return {'message': message, 'calls': calls, 'finish': reason, 'usage': data.get('usage', {})}
+
+    def _llamacpp(self, messages, schemas):
+        # Sanitize messages to ensure every message has a valid string 'content' field
+        sanitized_messages = []
+        for m in messages:
+            msg = dict(m)
+            if 'content' not in msg or msg['content'] is None:
+                msg['content'] = ''
+            elif not isinstance(msg['content'], str):
+                msg['content'] = json.dumps(msg['content'], ensure_ascii=False)
+            sanitized_messages.append(msg)
+
+        payload = {'model': self.model, 'messages': sanitized_messages}
+        if schemas:
+            payload['tools'] = schemas
+
+        headers = {}
+        if self.key and self.key != 'no-key-needed':
+            headers['Authorization'] = f'Bearer {self.key}'
+
+        data = post_json(self.url, headers, payload)
+        choice = data['choices'][0]
+        message = choice['message']
+        calls = [{'id': c['id'], 'name': c['function']['name'], 'arguments': c['function']['arguments']} for c in message.get('tool_calls', [])]
+        return {'message': message, 'calls': calls, 'finish': choice.get('finish_reason'), 'usage': data.get('usage', {})}
